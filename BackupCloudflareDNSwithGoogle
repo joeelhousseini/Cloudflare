@@ -1,13 +1,16 @@
 
 /**
-*This Script will connect to Cloudflare using an API token that you create
-*with your Cloudflare account. The token needs the following permissions:
+* Host Platform: Google Sheets
+* Target Platform: Cloudflare
+* Github account: https://github.com/joeelhousseini/
+* This Script will connect to Cloudflare using an API token that you create
+* with your Cloudflare account. The token needs the following permissions:
 *
-*Zone.Read
-*DNS.Read
+* Zone.Read
+* DNS.Read
 *
-*Once you have an API token, add it in the PROP_KEY_CF_TOKEN variable, and 
-*then start the syncCloudflareDNS() from within the Google Sheet
+* Once you have an API token, add it in the PROP_KEY_CF_TOKEN variable, and 
+* then start the syncCloudflareDNS() from within the Google Sheet
 *
 */
 
