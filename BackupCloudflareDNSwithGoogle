@@ -1,0 +1,206 @@
+
+/**
+*This Script will connect to Cloudflare using an API token that you create
+*with your Cloudflare account. The token needs the following permissions:
+*
+*Zone.Read
+*DNS.Read
+*
+*Once you have an API token, add it in the PROP_KEY_CF_TOKEN variable, and 
+*then start the syncCloudflareDNS() from within the Google Sheet
+*
+*/
+
+const CF_API_BASE = 'https://api.cloudflare.com/client/v4';
+const PROP_KEY_CF_TOKEN = 'ADD_YOUR_CLOUDFLARE_API_TOKEN_HERE';
+
+
+function syncCloudflareDNS() {
+  const token = PropertiesService.getScriptProperties().getProperty(PROP_KEY_CF_TOKEN);
+  if (!token) {
+    throw new Error('Cloudflare token not set. Run setSecrets() first.');
+  }
+
+  const zones = getAllZones(token);
+  if (!zones.length) {
+    Logger.log('No zones found.');
+    return;
+  }
+
+  zones.forEach(zone => {
+    const zoneId = zone.id;
+    const zoneName = zone.name;
+    const records = getAllDNSRecords(token, zoneId);
+
+    // Prepare data table
+    const headers = [
+      'id',
+      'type',
+      'name',
+      'content',
+      'proxied',
+      'ttl',
+      'priority',
+      'created_on',
+      'modified_on',
+      'zone_id',
+      'zone_name',
+      'comment',
+      'tags'
+    ];
+
+    const rows = records.map(r => ([
+      safe(r.id),
+      safe(r.type),
+      safe(r.name),
+      stringifyContent(r),
+      safe(r.proxied),
+      safe(r.ttl),
+      r.priority != null ? r.priority : '',
+      safe(r.created_on),
+      safe(r.modified_on),
+      safe(zoneId),
+      safe(zoneName),
+      r.comment != null ? r.comment : '',
+      Array.isArray(r.tags) ? r.tags.join(',') : ''
+    ]));
+
+    const sheet = ensureSheet(zoneName);
+    // Replace previous contents
+    sheet.clearContents();
+    if (rows.length) {
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+      autoResize(sheet, headers.length);
+    } else {
+      // Write only headers if no records
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      autoResize(sheet, headers.length);
+    }
+  });
+
+  SpreadsheetApp.getActive().toast('Cloudflare DNS sync complete');
+}
+
+
+function getAllZones(token) {
+  const zones = [];
+  let page = 1;
+  const perPage = 50;
+
+  while (true) {
+    const url = `${CF_API_BASE}/zones?page=${page}&per_page=${perPage}`;
+    const res = cfFetch(url, token);
+    if (!res.success) {
+      throw new Error('Failed to list zones: ' + JSON.stringify(res.errors));
+    }
+    zones.push(...res.result);
+    const info = res.result_info || {};
+    const totalPages = info.total_pages || 1;
+    if (page >= totalPages) break;
+    page += 1;
+  }
+  return zones;
+}
+
+function getAllDNSRecords(token, zoneId) {
+  const records = [];
+  let page = 1;
+  const perPage = 100;
+
+  while (true) {
+    const url = `${CF_API_BASE}/zones/${encodeURIComponent(zoneId)}/dns_records?page=${page}&per_page=${perPage}`;
+    const res = cfFetch(url, token);
+    if (!res.success) {
+      throw new Error(`Failed to list DNS records for zone ${zoneId}: ` + JSON.stringify(res.errors));
+    }
+    records.push(...res.result);
+    const info = res.result_info || {};
+    const totalPages = info.total_pages || 1;
+    if (page >= totalPages) break;
+    page += 1;
+  }
+  return records;
+}
+
+function cfFetch(url, token, options) {
+  const maxAttempts = 5;
+  let attempt = 0;
+  let lastErr = null;
+
+  while (attempt < maxAttempts) {
+    try {
+      const resp = UrlFetchApp.fetch(url, {
+        method: (options && options.method) || 'get',
+        muteHttpExceptions: true,
+        contentType: 'application/json',
+        payload: options && options.payload ? JSON.stringify(options.payload) : undefined,
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const code = resp.getResponseCode();
+      const body = resp.getContentText();
+
+      if (code === 429 || (code >= 500 && code < 600)) {
+        // Backoff and retry
+        const delay = Math.min(30000, Math.pow(2, attempt) * 500);
+        Utilities.sleep(delay);
+        attempt += 1;
+        continue;
+      }
+
+      // Parse JSON for all other codes
+      try {
+        return JSON.parse(body);
+      } catch (e) {
+        throw new Error(`Non JSON response, status ${code}: ` + body);
+      }
+    } catch (e) {
+      lastErr = e;
+      const delay = Math.min(30000, Math.pow(2, attempt) * 500);
+      Utilities.sleep(delay);
+      attempt += 1;
+    }
+  }
+  throw new Error('Cloudflare request failed after retries: ' + (lastErr ? lastErr.message : 'unknown error'));
+}
+
+
+function ensureSheet(name) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  // Tab names cannot exceed 100 chars, replace unsafe characters
+  const safeName = sanitizeSheetName(name);
+  let sheet = ss.getSheetByName(safeName);
+  if (!sheet) {
+    sheet = ss.insertSheet(safeName);
+  }
+  return sheet;
+}
+
+function sanitizeSheetName(name) {
+  // Replace forbidden characters: [], :, ?, *, /, \
+  let out = name.replace(/[\[\]\:\?\*\/\\]/g, '_');
+  if (out.length > 100) out = out.substring(0, 100);
+  return out;
+}
+
+function autoResize(sheet, cols) {
+  for (let c = 1; c <= cols; c++) {
+    sheet.autoResizeColumn(c);
+  }
+}
+
+function stringifyContent(record) {
+  // Some record types have structured content or additional settings
+  // We keep the main "content" field, plus fallback if missing
+  if (record.content != null) return record.content;
+  // As a fallback, stringify the whole object
+  return JSON.stringify(record);
+}
+
+function safe(v) {
+  return v == null ? '' : v;
+}
